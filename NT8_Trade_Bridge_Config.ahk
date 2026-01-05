@@ -6,17 +6,21 @@
 ; ==============================================================================
 global IniFile := "settings.ini"
 global NT8_EXE_NAME := "NinjaTrader.exe"
+global LastFileSize := 0
+global TargetInst := ""
 
-; INI 파일에서 기존 경로를 읽어옵니다. 파일이 없으면 하워드 지침서의 기본값을 사용합니다. 
-global SavedLogPath := IniRead(IniFile, "Paths", "EnsignLog", "C:\Ensign10\Output.txt")
+; INI 파일에서 저장된 경로들을 읽어옵니다.
+global SavedLogPath := IniRead(IniFile, "Paths", "EnsignLog", "C:\Ensign10\OutputLog\DYO.txt")
 global SavedStatusPath := IniRead(IniFile, "Paths", "ConsulStatus", "C:\Trading\status.txt")
+global SavedInstPath := IniRead(IniFile, "Paths", "InstrumentFile", "C:\Trading\instrument.txt")
 
-MyGui := Gui("+AlwaysOnTop", "NT8 Trade Bridge v1.5")
+MyGui := Gui("+AlwaysOnTop", "NT8 Trade Bridge v1.6.1")
 MyGui.SetFont("s9", "Segoe UI")
 
 ; --- Path Configuration Section ---
-MyGui.Add("GroupBox", "w380 h120", "File Path Settings")
-MyGui.Add("Text", "xp+10 yp+25", "Ensign Output (Signal):")
+MyGui.Add("GroupBox", "w380 h160", "File Path Settings") 
+
+MyGui.Add("Text", "xp+10 yp+25", "Ensign DYO.txt (Signal Trigger):")
 EditLogPath := MyGui.Add("Edit", "r1 w250", SavedLogPath)
 MyGui.Add("Button", "x+5 yp-2 w60", "Browse").OnEvent("Click", SelectLogFile)
 
@@ -24,11 +28,16 @@ MyGui.Add("Text", "xm+10 yp+35", "Consul Status (Helper):")
 EditStatusPath := MyGui.Add("Edit", "r1 w250", SavedStatusPath)
 MyGui.Add("Button", "x+5 yp-2 w60", "Browse").OnEvent("Click", SelectStatusFile)
 
+; [추가] Instrument Config 경로 설정
+MyGui.Add("Text", "xm+10 yp+35", "Instrument Config (Targeting):")
+EditInstPath := MyGui.Add("Edit", "r1 w250", SavedInstPath)
+MyGui.Add("Button", "x+5 yp-2 w60", "Browse").OnEvent("Click", SelectInstFile)
+
 ; --- Control Buttons ---
 BtnStart := MyGui.Add("Button", "xm w380 h45 Default", "START MONITORING (SAVE & HIDE)")
 BtnStart.OnEvent("Click", StartProcess)
 
-; --- Tray Menu (숨겨진 UI 복구용) ---
+; --- Tray Menu ---
 A_TrayMenu.Delete()
 A_TrayMenu.Add("Show Config", (*) => MyGui.Show())
 A_TrayMenu.Add("Exit Program", (*) => ExitApp())
@@ -40,11 +49,10 @@ MyGui.Show()
 ; FUNCTIONS
 ; ==============================================================================
 
-; [단축키: Ctrl+Alt+S를 누르면 설정창이 다시 나타납니다]
 ^!s::MyGui.Show()
 
 SelectLogFile(*) {
-    SelectedFile := FileSelect(3, , "Select Ensign Output File", "Text Documents (*.txt)")
+    SelectedFile := FileSelect(3, , "Select Ensign DYO.txt File", "Text Documents (*.txt)")
     if SelectedFile != ""
         EditLogPath.Value := SelectedFile
 }
@@ -55,17 +63,38 @@ SelectStatusFile(*) {
         EditStatusPath.Value := SelectedFile
 }
 
+; [추가] instrument.txt 파일 선택 함수
+SelectInstFile(*) {
+    SelectedFile := FileSelect(3, , "Select Instrument Config File", "Text Documents (*.txt)")
+    if SelectedFile != ""
+        EditInstPath.Value := SelectedFile
+}
+
 StartProcess(*) {
-    ; 현재 입력된 경로를 INI 파일에 저장합니다.
+    global LastFileSize, TargetInst
+    
+    ; 설정값 저장
     IniWrite(EditLogPath.Value, IniFile, "Paths", "EnsignLog")
     IniWrite(EditStatusPath.Value, IniFile, "Paths", "ConsulStatus")
+    IniWrite(EditInstPath.Value, IniFile, "Paths", "InstrumentFile")
+    
+    ; [추가] 시작 시 설정된 경로에서 종목명 읽기
+    if FileExist(EditInstPath.Value) {
+        content := Trim(FileRead(EditInstPath.Value))
+        if content != ""
+            TargetInst := StrSplit(content, "`n", "`r")[1] ; 첫 줄만 가져옴
+    }
+
+    if FileExist(EditLogPath.Value)
+        LastFileSize := FileGetSize(EditLogPath.Value)
     
     MyGui.Hide() 
-    TrayTip("NT8 Trade Bridge", "Settings Saved. Monitoring started.", 1)
-    SetTimer(CheckFiles, 100) 
+    TrayTip("NT8 Trade Bridge v1.6.1", "Monitoring Started with Target: " . (TargetInst = "" ? "General" : TargetInst), 1)
+    SetTimer(CheckFiles, 200)
 }
 
 CheckFiles() {
+    global LastFileSize
     LogPath := EditLogPath.Value
     StatusPath := EditStatusPath.Value
 
@@ -73,50 +102,55 @@ CheckFiles() {
         return
 
     try {
-        ; 1. 파일 읽기 (하워드의 지침서에 따른 ASCII 로그 모니터링) [cite: 84, 194]
-        status := FileRead(StatusPath)
-        signalRaw := FileRead(LogPath)
-
-        if signalRaw == ""
+        status := Trim(FileRead(StatusPath))
+        if (status = "PAUSED") ;
             return
 
-        ; 2. 신호 분석 (Format: BUY/SELL, INSTRUMENT)
-        parsedData := StrSplit(signalRaw, ",")
-        if (parsedData.Length < 2)
+        CurrentSize := FileGetSize(LogPath)
+        if (CurrentSize <= LastFileSize) {
+            LastFileSize := CurrentSize
             return
+        }
 
-        command := Trim(parsedData[1])
-        instrument := Trim(parsedData[2])
+        FileObj := FileOpen(LogPath, "r")
+        FileObj.Seek(LastFileSize)
+        NewLines := FileObj.Read()
+        FileObj.Close()
+        LastFileSize := CurrentSize
 
-        ; 3. Consul Helper의 상태 게이트 확인
-        if InStr(status, "CLEAR") {
-            if (command == "BUY") {
-                ExecuteTrade("F4", instrument)
-                FileDelete(LogPath) 
+        Loop Parse, NewLines, "`n", "`r" {
+          
+            if (A_LoopField = "")
+                continue
+            
+            if (status = "CLEAR") { ;
+                if InStr(A_LoopField, "Ninja BUY") ;
+                    ExecuteTrade("F4")
+                else if InStr(A_LoopField, "Ninja SELL") ;
+                    ExecuteTrade("F9")
             }
-            else if (command == "SELL") {
-                ExecuteTrade("F9", instrument)
-                FileDelete(LogPath)
-            }
-        } else {
-            ; BUSY 상태일 때 신호 삭제 (하워드 로직 준수)
-            FileDelete(LogPath)
         }
     } catch Error {
         return 
     }
 }
 
-ExecuteTrade(Key, Inst) {
-    ; 타이틀과 실행파일을 조합한 정확한 윈도우 타겟팅
-    targetWin := "SuperDOM - " . Inst . " ahk_exe " . NT8_EXE_NAME
+ExecuteTrade(Key) {
+    global TargetInst
+    ; [보완] 종목명이 있으면 특정 SuperDOM을, 없으면 전체 NT8 창을 타겟팅
+    targetTitle := (TargetInst != "") ? "SuperDOM - " . TargetInst . " ahk_exe " . NT8_EXE_NAME : "ahk_exe " . NT8_EXE_NAME
     
-    if WinExist(targetWin) {
-        WinActivate(targetWin) 
-        Sleep(150) 
+    if WinExist(targetTitle) {
+        WinActivate(targetTitle)
+        Sleep(150)
         Send("{" . Key . "}")
-        TrayTip("Trade Executed", Inst . " : " . Key . " sent.", 1)
+        TrayTip("Trade Sent", (TargetInst = "" ? "Active Window" : TargetInst) . " : " . Key, 1)
     } else {
-        TrayTip("Window Error", "Could not find: " . targetWin, 3)
+        ; Fallback: 특정 종목 창이 없으면 실행 중인 NT8 프로세스에 전송
+        if WinExist("ahk_exe " . NT8_EXE_NAME) {
+            WinActivate("ahk_exe " . NT8_EXE_NAME)
+            Sleep(150)
+            Send("{" . Key . "}")
+        }
     }
 }

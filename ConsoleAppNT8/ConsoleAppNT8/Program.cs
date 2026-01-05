@@ -64,9 +64,18 @@ internal class Program
             return;
         }
 
+        bool isPaused = false;
+
         // --- Main Monitoring Loop ---
         while (true)
         {
+            if (Console.KeyAvailable)
+            {
+                var key = Console.ReadKey(true).Key;
+                if (key == ConsoleKey.P) isPaused = true;
+                if (key == ConsoleKey.R) isPaused = false;
+            }
+
             try
             {
                 bool isSystemBusy = false;
@@ -93,7 +102,20 @@ internal class Program
                     posLines.Add(string.Format(" {0,-15} | Position: {1,4}", inst, pos));
                 }
 
-                string filterStatus = isSystemBusy ? "BUSY " : "CLEAR"; // Extra space to clear old chars
+                string filterStatus;
+
+                if (isPaused)
+                {
+                    filterStatus = "PAUSED";
+                    posLines.Clear();
+                    orderLines.Clear();
+                    posLines.Add(" Monitoring is currently PAUSED. ");
+                    orderLines.Add(" Manual trading mode active.   ");
+                }
+                else
+                {
+                    filterStatus = isSystemBusy ? "BUSY " : "CLEAR";
+                }
 
                 // --- Flicker-Free UI Update ---
                 // Instead of Console.Clear(), move the cursor to the top-left
@@ -120,6 +142,7 @@ internal class Program
                 }
 
                 Console.WriteLine("╟──────────────────────────────────────────────────╢");
+                Console.WriteLine("║ [P] Pause Monitoring | [R] Resume Monitoring     ║");
                 Console.WriteLine(string.Format("║  Last Update: {0,-34} ║", DateTime.Now.ToString("HH:mm:ss")));
                 Console.WriteLine("╚══════════════════════════════════════════════════╝");
 
