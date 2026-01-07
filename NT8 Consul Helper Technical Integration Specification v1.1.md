@@ -7,38 +7,51 @@ sequenceDiagram
     participant E as Ensign DYO
     participant DYO as DYO.txt (Cumulative)
     participant CH as Consul Helper (v1.1)
-    participant STF as status.txt (Safety Gate)
+    participant NT8 as NinjaTrader 8
+    participant STF as status.txt (Command Bridge)
     participant AHK as AHK (v1.6.2)
-    participant NT8 as NinjaTrader 8 (Targeted SuperDOM)
 
-    Note over CH: Trigger-based Logic 
+    Note over CH: Controller: Monitoring & Decision Logic
 
     rect rgb(255, 245, 245)
-        Note over E, DYO: 1. Signal Generation
-        E->>DYO: Append New Signal (Date, Time, Instrument, Signal)
+        Note over E, DYO: Step 1: Signal Detection
+        E->>DYO: Append New Signal (Date, Time, Inst, Action)
         Note right of E: e.g., "01-06, 10:56:02, YMH26 Ninja SELL"
     end
 
     rect rgb(230, 240, 255)
-        Note over CH, DYO: 2. Triggered Monitoring
+        Note over CH, DYO: Step 2: Intelligent Parsing
         CH->>DYO: Detect File Size Change
-        Note right of CH: Polls NT8 Status ONLY upon signal detection
-        CH->>NT8: Check Positions/Orders (Account)
-        CH->>STF: Write Status (CLEAR or BUSY)
+        CH->>CH: Extract Instrument (YMH26) & Action (SELL)
+    end
+
+    rect rgb(240, 240, 255)
+        Note over CH, NT8: Step 3: Mode & Status Verification
+        CH->>CH: Check Internal Mode: Is it [AUTO]?
+        
+        alt Mode == AUTO
+            CH->>NT8: Request Status (API Call)
+            NT8-->>CH: Return Status (CLEAR or BUSY)
+        else Mode == MANUAL
+            Note right of CH: Signal logged but ignored (Manual Override)
+        end
     end
 
     rect rgb(240, 255, 240)
-        Note over AHK: 3. Decision & Mode Check
-        AHK->>STF: Confirm Status == "CLEAR"
-        Note right of AHK: UI Mode: [AUTO] or [MANUAL]
-        
-        alt Status == "CLEAR" AND Mode == "AUTO"
-            Note right of AHK: [PROCEED]
-            AHK->>NT8: Send F4/F9 to "SuperDOM - YMH26"
-        else Status == "BUSY" OR Mode == "MANUAL"
-            Note right of AHK: [BLOCK/SKIP]
-            Note over AHK: Order ignored (Manual Override or Risk Filter)
+        Note over CH, STF: Step 4: Command Transmission
+        alt Mode == AUTO AND Status == CLEAR
+            CH->>STF: Write Trade Command (e.g., "SELL, YMH26")
+        else Status == BUSY
+            Note right of CH: Safety Block: Active position exists
         end
+    end
+
+    rect rgb(255, 255, 230)
+        Note over AHK, NT8: Step 5: Targeted Execution
+        AHK->>STF: Read Command from Bridge
+        AHK->>NT8: Activate "SuperDOM - YMH26"
+        AHK->>NT8: Send Hotkey (F4 or F9)
+        AHK->>STF: Clear Bridge (Reset)
     end
 ```
 
@@ -48,13 +61,13 @@ The **Consul Helper** monitors the `C:\Ensign10\OutputLog\DYO.txt` file in real-
 
 #### **Step 2. Intelligent Signal Parsing**
 
-When a new signal is detected, the Consul Helper parses the raw data line (e.g., `01-06, 10:56:02, YMH26 Ninja SELL`). It extracts three vital components:
+When a new signal is detected, the Consul Helper parses the raw data line (e.g., `01-06, 10:56:02, YMH26 Ninja SELL`). It extracts three vital components.
 
 - **Timestamp**: To ensure the signal is current.
 - **Instrument Code**: Specifically identifying the target (e.g., `YMH26`) for precise window targeting.
 - **Trade Action**: Determining the direction (`BUY` or `SELL`).
 
-#### **Step 3: Real-time Status & Mode Verification**
+#### **Step 3. Real-time Status & Mode Verification**
 
 Immediately after parsing, the Helper verifies the system's readiness based on two conditions:
 
