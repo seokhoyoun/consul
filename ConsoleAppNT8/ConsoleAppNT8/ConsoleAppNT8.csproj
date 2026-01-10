@@ -35,6 +35,12 @@
     </Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="NT8_Trade_Bridge_Config.ahk">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
  
 
 </Project>

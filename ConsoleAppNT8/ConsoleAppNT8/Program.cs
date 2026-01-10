@@ -3,158 +3,213 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 internal class Program
 {
+    private static long lastFileSize = 0;
+    private static bool isAutoMode = true;
+    private static string dyoPath = @"C:\Ensign10\OutputLog\DYO.txt";
+    private static string statusFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "status.txt");
+    private static string accountPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "account.txt");
+    private static string dyoPathConfigFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dyoPath.txt");
+    private static string account = "";
+
+    // UI 전용 변수 업데이트
+    private static string lastSignalTime = "N/A";
+    private static string lastSignalDetail = "N/A"; // [추가] 방향 및 종목 정보 저장
+
     private static void Main(string[] args)
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
-
-        // 1. Setup File Paths
-        string instrumentPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "instrument.txt");
-        string accountPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "account.txt");
-        string statusFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "status.txt");
-
-        List<string> instruments = new List<string>();
-        string account = "";
-
-        // Hide the blinking cursor to reduce visual noise
         Console.CursorVisible = false;
 
-        // --- Initial Setup Logic ---
         try
         {
-            if (File.Exists(instrumentPath))
+            if (File.Exists(dyoPathConfigFile))
             {
-                instruments = File.ReadAllLines(instrumentPath)
-                                  .Where(line => !string.IsNullOrWhiteSpace(line))
-                                  .Select(line => line.Trim())
-                                  .ToList();
+                string loadedPath = File.ReadAllText(dyoPathConfigFile).Trim();
+                if (!string.IsNullOrEmpty(loadedPath)) dyoPath = loadedPath;
+            }
+            else
+            {
+                File.WriteAllText(dyoPathConfigFile, dyoPath);
             }
 
-            if (instruments.Count == 0)
+            if (!File.Exists(dyoPath))
             {
-                Console.WriteLine("[SETUP] 'instrument.txt' not found. Enter Instruments (e.g., MES MAR26): ");
-                string input = Console.ReadLine();
-                if (!string.IsNullOrWhiteSpace(input))
-                {
-                    instruments = input.Split(',').Select(s => s.Trim()).ToList();
-                    File.WriteAllLines(instrumentPath, instruments);
-                }
-                else return;
+                Directory.CreateDirectory(Path.GetDirectoryName(dyoPath));
+                File.WriteAllText(dyoPath, "");
             }
+            lastFileSize = new FileInfo(dyoPath).Length;
 
             if (File.Exists(accountPath)) account = File.ReadAllText(accountPath).Trim();
             if (string.IsNullOrEmpty(account))
             {
-                Console.WriteLine("[SETUP] 'account.txt' not found. Enter Account Name: ");
-                account = Console.ReadLine()?.Trim();
-                if (!string.IsNullOrEmpty(account)) File.WriteAllText(accountPath, account);
-                else return;
+                Console.Write("[SETUP] Enter Account Name: ");
+                account = Console.ReadLine()?.Trim() ?? "Sim101";
+                File.WriteAllText(accountPath, account);
             }
         }
-        catch (Exception ex) { Console.WriteLine($"[BOOT ERROR] {ex.Message}"); return; }
+        catch (Exception ex) { Console.WriteLine($"Init Error: {ex.Message}"); return; }
 
         Client ntClient = new Client();
         if (ntClient.Connected(0) != 0)
         {
-            Console.WriteLine("[CONNECTION ERROR] Ensure NT8 is running.");
+            Console.WriteLine("[ERROR] NT8 is not running. Please start NinjaTrader.");
             Thread.Sleep(3000);
             return;
         }
 
-        bool isPaused = false;
+        Console.Clear();
 
-        // --- Main Monitoring Loop ---
         while (true)
         {
-            if (Console.KeyAvailable)
-            {
-                var key = Console.ReadKey(true).Key;
-                if (key == ConsoleKey.P) isPaused = true;
-                if (key == ConsoleKey.R) isPaused = false;
-            }
-
             try
             {
-                bool isSystemBusy = false;
-                List<string> posLines = new List<string>();
-                List<string> orderLines = new List<string>();
+                bool isSystemBusy = CheckSystemBusy(ntClient);
+                HandleInput(isSystemBusy);
 
-                // Fetch data from NT8
-                string rawOrders = ntClient.Orders(account);
-                if (!string.IsNullOrEmpty(rawOrders))
+                FileInfo dyoInfo = new FileInfo(dyoPath);
+
+                // 파일이 없거나 크기가 0인 경우 리셋으로 간주
+                if (!dyoInfo.Exists || dyoInfo.Length == 0)
                 {
-                    string[] ids = rawOrders.Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (var id in ids)
-                    {
-                        string oStatus = ntClient.OrderStatus(id);
-                        if (oStatus.Equals("Working", StringComparison.OrdinalIgnoreCase)) isSystemBusy = true;
-                        orderLines.Add(string.Format(" ID: {0,-15} | Status: {1,-12}", id, oStatus));
-                    }
+                    lastFileSize = 0;
+                    lastSignalTime = "N/A";
+                    lastSignalDetail = "N/A";
+                }
+                else if (dyoInfo.Length < lastFileSize)
+                {
+                    // 파일 리셋 대응 (PowerShell 스크립트 등)
+                    lastFileSize = 0;
+                    lastSignalTime = "N/A";
+                    lastSignalDetail = "N/A";
+                }
+                else if (dyoInfo.Length > lastFileSize)
+                {
+                    ProcessNewSignals(ntClient, isSystemBusy);
+                    lastFileSize = dyoInfo.Length;
                 }
 
-                foreach (var inst in instruments)
-                {
-                    int pos = ntClient.MarketPosition(inst, account);
-                    if (pos != 0) isSystemBusy = true;
-                    posLines.Add(string.Format(" {0,-15} | Position: {1,4}", inst, pos));
-                }
-
-                string filterStatus;
-
-                if (isPaused)
-                {
-                    filterStatus = "PAUSED";
-                    posLines.Clear();
-                    orderLines.Clear();
-                    posLines.Add(" Monitoring is currently PAUSED. ");
-                    orderLines.Add(" Manual trading mode active.   ");
-                }
-                else
-                {
-                    filterStatus = isSystemBusy ? "BUSY " : "CLEAR";
-                }
-
-                // --- Flicker-Free UI Update ---
-                // Instead of Console.Clear(), move the cursor to the top-left
-                Console.SetCursorPosition(0, 0);
-
-                Console.WriteLine("╔══════════════════════════════════════════════════╗");
-                Console.WriteLine("║           NINJATRADER API STATUS HELPER          ║");
-                Console.WriteLine("╠══════════════════════════════════════════════════╣");
-                Console.WriteLine(string.Format("║  SYSTEM FILTER STATUS :  {0,-23} ║", filterStatus));
-                Console.WriteLine("╠══════════════════════════════════════════════════╣");
-                Console.WriteLine(string.Format("║  ACCOUNT: {0,-38} ║", account));
-                Console.WriteLine("╟──────────────────────────────────────────────────╢");
-                Console.WriteLine("║ [INSTRUMENT POSITIONS]                           ║");
-                foreach (var line in posLines) Console.WriteLine(string.Format("║ {0,-48} ║", line));
-                Console.WriteLine("╟──────────────────────────────────────────────────╢");
-                Console.WriteLine("║ [ACTIVE ORDER LIST]                              ║");
-
-                // Print a fixed number of rows to avoid leftover text
-                int maxOrders = 5;
-                for (int i = 0; i < maxOrders; i++)
-                {
-                    string line = (i < orderLines.Count) ? orderLines[i] : " ".PadRight(48);
-                    Console.WriteLine(string.Format("║ {0,-48} ║", line));
-                }
-
-                Console.WriteLine("╟──────────────────────────────────────────────────╢");
-                Console.WriteLine("║ [P] Pause Monitoring | [R] Resume Monitoring     ║");
-                Console.WriteLine(string.Format("║  Last Update: {0,-34} ║", DateTime.Now.ToString("HH:mm:ss")));
-                Console.WriteLine("╚══════════════════════════════════════════════════╝");
-
-                File.WriteAllText(statusFilePath, filterStatus.Trim());
-                Thread.Sleep(500);
+                DrawUI(isSystemBusy, dyoInfo.Exists ? dyoInfo.Length : 0);
+                Thread.Sleep(200);
             }
             catch (Exception ex)
             {
-                Console.SetCursorPosition(0, 20); // Move error log to bottom
+                Console.SetCursorPosition(0, 18);
                 Console.WriteLine($"[RUNTIME ERROR] {ex.Message} ".PadRight(50));
-                Thread.Sleep(2000);
             }
         }
+    }
+
+    private static void HandleInput(bool isBusy)
+    {
+        if (Console.KeyAvailable)
+        {
+            var key = Console.ReadKey(true).Key;
+            if (key == ConsoleKey.M && !isBusy)
+            {
+                isAutoMode = !isAutoMode;
+            }
+        }
+    }
+    private static void ProcessNewSignals(Client ntClient, bool isBusy)
+    {
+        using (var stream = new FileStream(dyoPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        using (var reader = new StreamReader(stream))
+        {
+            stream.Seek(lastFileSize, SeekOrigin.Begin);
+            string newLines = reader.ReadToEnd();
+
+            foreach (string line in newLines.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                // 쉼표로 split: 01-10, 08:57:21, YMH26 Ninja SELL
+                string[] parts = line.Split(',');
+
+                if (parts.Length >= 3)
+                {
+                    lastSignalTime = parts[1].Trim(); // 시간 추출
+
+                    // 세 번째 부분에서 instrument와 action 추출
+                    string[] detailParts = parts[2].Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                    if (detailParts.Length >= 3 && detailParts[1].Equals("Ninja", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string instrument = detailParts[0]; // YMH26
+                        string action = detailParts[2].ToUpper(); // BUY 또는 SELL
+
+                        // UI 표시용 정보 업데이트
+                        lastSignalDetail = $"{action} @ {instrument}";
+
+                        if (isAutoMode && !isBusy)
+                        {
+                            File.WriteAllText(statusFilePath, $"{action}, {instrument}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static bool CheckSystemBusy(Client ntClient)
+    {
+        if (!isAutoMode) return false; // 리소스 절약을 위해 수동 모드 시 API 호출 생략
+        string orders = ntClient.Orders(account);
+        return !string.IsNullOrEmpty(orders) && orders.Split('|').Any(id => ntClient.OrderStatus(id) == "Working");
+    }
+
+    private static void DrawUI(bool isBusy, long currentSize)
+    {
+        Console.SetCursorPosition(0, 0);
+        Console.WriteLine("╔══════════════════════════════════════════════════╗");
+        Console.WriteLine("║           NINJATRADER CONSUL HELPER v1.1.4       ║");
+        Console.WriteLine("╠══════════════════════════════════════════════════╣");
+
+        // 1. SYSTEM STATUS
+        Console.Write("║  SYSTEM STATUS : ");
+        Console.ForegroundColor = isBusy ? ConsoleColor.Red : ConsoleColor.Green;
+        Console.Write(string.Format("{0,-32}", isBusy ? "[BUSY]" : "[CLEAR]"));
+        Console.ResetColor();
+        Console.WriteLine("║");
+
+        // 2. CONTROL MODE
+        Console.Write("║  CONTROL MODE  : ");
+        string modeStr = isAutoMode ? "[AUTO]" : "[MANUAL]";
+        if (isBusy)
+        {
+            Console.ForegroundColor = ConsoleColor.Gray;
+            Console.Write(string.Format("{0,-8} (LOCKED)", modeStr));
+            Console.ResetColor();
+            Console.Write(string.Format("{0,15}", ""));
+        }
+        else
+        {
+            Console.ForegroundColor = isAutoMode ? ConsoleColor.Cyan : ConsoleColor.Yellow;
+            Console.Write(string.Format("{0,-32}", modeStr));
+        }
+        Console.ResetColor();
+        Console.WriteLine("║");
+
+        Console.WriteLine("╠══════════════════════════════════════════════════╣");
+        Console.WriteLine(string.Format("║  ACCOUNT     : {0,-33} ║", account));
+        Console.WriteLine(string.Format("║  DYO PATH    : {0,-33} ║", TruncatePath(dyoPath, 33)));
+        Console.WriteLine(string.Format("║  FILE SIZE   : {0,-33} ║", currentSize.ToString("N0") + " bytes"));
+
+        // 3. LAST SIGNAL (Time + Detail 통합 표시)
+        string signalDisplay = (lastSignalTime == "N/A") ? "N/A" : $"{lastSignalTime} ({lastSignalDetail})";
+        Console.WriteLine(string.Format("║  LAST SIGNAL : {0,-33} ║", signalDisplay));
+
+        Console.WriteLine("╟──────────────────────────────────────────────────╢");
+        Console.WriteLine("║ [M] Toggle Mode (Only in CLEAR status)           ║");
+        Console.WriteLine(string.Format("║ Current Time : {0,-33} ║", DateTime.Now.ToString("HH:mm:ss")));
+        Console.WriteLine("╚══════════════════════════════════════════════════╝");
+    }
+
+    private static string TruncatePath(string path, int maxLength)
+    {
+        if (path.Length <= maxLength) return path;
+        return "..." + path.Substring(path.Length - (maxLength - 3));
     }
 }
